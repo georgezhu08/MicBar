@@ -5,8 +5,17 @@ import ServiceManagement
 /// Owns the NSStatusItem and builds the menu on demand.
 final class MenuBarController: NSObject, NSMenuDelegate {
     private var statusItem: NSStatusItem!
+    private var idleIcon: NSImage?
+    private var statusIcon: NSImage?
+    private var dimStatusIcon: NSImage?
+    private var blinkTimer: Timer?
+    private var isBlinkVisible = true
     private let audioManager = AudioDeviceManager.shared
     private let processDetector = ProcessDetector.shared
+
+    deinit {
+        blinkTimer?.invalidate()
+    }
 
     func setup() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -14,6 +23,16 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         statusItem.button?.target = self
         statusItem.button?.action = #selector(statusItemClicked)
         statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+
+        idleIcon = NSImage(systemSymbolName: "mic", accessibilityDescription: "Microphone inactive")
+        idleIcon?.isTemplate = true
+
+        let iconPointSize = (statusItem.button?.font?.pointSize ?? NSFont.systemFontSize) * 0.9
+        let configuration = NSImage.SymbolConfiguration(pointSize: iconPointSize, weight: .regular)
+        statusIcon = makeIcon(named: "circle.fill", color: .systemRed,
+                              accessibilityDescription: "Microphone in use", configuration: configuration)
+        dimStatusIcon = makeIcon(named: "circle.fill", color: .systemRed.withAlphaComponent(0.25),
+                                 accessibilityDescription: "Microphone in use", configuration: configuration)
 
         let menu = NSMenu()
         menu.delegate = self
@@ -31,22 +50,42 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     private func updateTitle() {
         let activeDevices = audioManager.activeInputDevices()
+
         if activeDevices.isEmpty {
-            // Nothing active — show a compact SF Symbol mic icon
+            blinkTimer?.invalidate()
+            blinkTimer = nil
             statusItem.button?.title = ""
-            statusItem.button?.image = NSImage(systemSymbolName: "mic", accessibilityDescription: "Microphone inactive")
+            statusItem.button?.image = idleIcon
             statusItem.button?.imagePosition = .imageOnly
+            statusItem.button?.setAccessibilityTitle("Microphone inactive")
         } else {
-            // Active — show red dot + device name, no image
-            statusItem.button?.image = nil
-            if activeDevices.count == 1 {
-                statusItem.button?.title = "🔴 \(activeDevices[0].1)"
-            } else {
-                let names = activeDevices.map { $0.1 }
-                statusItem.button?.title = "🔴 \(names.joined(separator: ", "))"
+            statusItem.button?.title = activeDevices.map { $0.1 }.joined(separator: ", ")
+            statusItem.button?.imagePosition = .imageLeft
+            statusItem.button?.setAccessibilityTitle("Microphone in use")
+
+            if blinkTimer == nil {
+                isBlinkVisible = true
+                blinkTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in
+                    guard let self else { return }
+                    self.isBlinkVisible.toggle()
+                    self.updateBlinkImage()
+                }
             }
-            statusItem.button?.imagePosition = .noImage
+            updateBlinkImage()
         }
+    }
+
+    private func updateBlinkImage() {
+        statusItem.button?.image = isBlinkVisible ? statusIcon : dimStatusIcon
+    }
+
+    private func makeIcon(named name: String, color: NSColor, accessibilityDescription: String,
+                          configuration: NSImage.SymbolConfiguration) -> NSImage? {
+        let paletteConfiguration = configuration.applying(.init(paletteColors: [color]))
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: accessibilityDescription)?
+            .withSymbolConfiguration(paletteConfiguration)
+        image?.isTemplate = false
+        return image
     }
 
     // MARK: - Menu Building

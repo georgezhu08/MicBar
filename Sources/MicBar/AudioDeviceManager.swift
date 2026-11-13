@@ -31,7 +31,12 @@ final class AudioDeviceManager {
 
     /// Returns input devices that currently have active audio streams (some process is using them).
     func activeInputDevices() -> [(AudioDeviceID, String)] {
-        return availableInputDevices().filter { (id, _) in isDeviceRunning(id) }
+        let devices = availableInputDevices()
+        // Device running state also includes playback on duplex devices, so prefer per-process input state.
+        if let activeIDs = activeInputDeviceIDsFromProcesses() {
+            return devices.filter { activeIDs.contains($0.0) }
+        }
+        return devices.filter { (id, _) in isDeviceRunning(id) }
     }
 
     /// Returns all available input devices as (id, name) pairs.
@@ -184,27 +189,64 @@ final class AudioDeviceManager {
         )
     }
 
+    private func activeInputDeviceIDsFromProcesses() -> Set<AudioDeviceID>? {
+        guard let processIDs = audioObjectIDs(
+            AudioObjectID(kAudioObjectSystemObject),
+            selector: kAudioHardwarePropertyProcessObjectList,
+            scope: kAudioObjectPropertyScopeGlobal
+        ) else { return nil }
+
+        var activeIDs = Set<AudioDeviceID>()
+        var readProcessState = false
+        for processID in processIDs {
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioProcessPropertyIsRunningInput,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            var isRunning: UInt32 = 0
+            var size = UInt32(MemoryLayout<UInt32>.size)
+            guard AudioObjectGetPropertyData(processID, &address, 0, nil, &size, &isRunning) == noErr else {
+                continue
+            }
+            readProcessState = true
+            guard isRunning != 0 else { continue }
+
+            let deviceIDs = audioObjectIDs(
+                processID,
+                selector: kAudioProcessPropertyDevices,
+                scope: kAudioObjectPropertyScopeInput
+            ) ?? []
+            activeIDs.formUnion(deviceIDs)
+        }
+        return readProcessState ? activeIDs : nil
+    }
+
     private func allDeviceIDs() -> [AudioDeviceID] {
+        return audioObjectIDs(
+            AudioObjectID(kAudioObjectSystemObject),
+            selector: kAudioHardwarePropertyDevices,
+            scope: kAudioObjectPropertyScopeGlobal
+        ) ?? []
+    }
+
+    private func audioObjectIDs(_ objectID: AudioObjectID, selector: AudioObjectPropertySelector,
+                                scope: AudioObjectPropertyScope) -> [AudioObjectID]? {
         var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
-            mScope: kAudioObjectPropertyScopeGlobal,
+            mSelector: selector,
+            mScope: scope,
             mElement: kAudioObjectPropertyElementMain
         )
         var size: UInt32 = 0
-        var status = AudioObjectGetPropertyDataSize(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address, 0, nil, &size
-        )
-        guard status == noErr, size > 0 else { return [] }
+        var status = AudioObjectGetPropertyDataSize(objectID, &address, 0, nil, &size)
+        guard status == noErr else { return nil }
+        guard size > 0 else { return [] }
 
-        let count = Int(size) / MemoryLayout<AudioDeviceID>.size
-        var deviceIDs = [AudioDeviceID](repeating: 0, count: count)
-        status = AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address, 0, nil, &size, &deviceIDs
-        )
-        guard status == noErr else { return [] }
-        return deviceIDs
+        let count = Int(size) / MemoryLayout<AudioObjectID>.size
+        var objectIDs = [AudioObjectID](repeating: 0, count: count)
+        status = AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, &objectIDs)
+        guard status == noErr else { return nil }
+        return objectIDs
     }
 
     private func hasInputStreams(_ deviceID: AudioDeviceID) -> Bool {
@@ -220,6 +262,10 @@ final class AudioDeviceManager {
     }
 
     private func nameForDevice(_ deviceID: AudioDeviceID) -> String? {
+        if let sourceName = inputSourceName(for: deviceID), !sourceName.isEmpty {
+            return sourceName
+        }
+
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyDeviceNameCFString,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -230,5 +276,37 @@ final class AudioDeviceManager {
         let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &unmanagedName)
         guard status == noErr, let cfName = unmanagedName?.takeUnretainedValue() else { return nil }
         return cfName as String
+    }
+
+    private func inputSourceName(for deviceID: AudioDeviceID) -> String? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDataSource,
+            mScope: kAudioObjectPropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var sourceID: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &sourceID) == noErr else {
+            return nil
+        }
+
+        address.mSelector = kAudioDevicePropertyDataSourceNameForIDCFString
+        return withUnsafeMutablePointer(to: &sourceID) { sourcePointer in
+            var output: Unmanaged<CFString>?
+            return withUnsafeMutablePointer(to: &output) { outputPointer -> String? in
+                var translation = AudioValueTranslation(
+                    mInputData: sourcePointer,
+                    mInputDataSize: UInt32(MemoryLayout<UInt32>.size),
+                    mOutputData: outputPointer,
+                    mOutputDataSize: UInt32(MemoryLayout<Unmanaged<CFString>>.size)
+                )
+                var translationSize = UInt32(MemoryLayout<AudioValueTranslation>.size)
+                let status = AudioObjectGetPropertyData(
+                    deviceID, &address, 0, nil, &translationSize, &translation
+                )
+                guard status == noErr, let name = outputPointer.pointee else { return nil }
+                return name.takeRetainedValue() as String
+            }
+        }
     }
 }

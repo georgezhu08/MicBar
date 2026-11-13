@@ -4,8 +4,8 @@ A macOS menu bar app that shows which microphone is actively capturing audio and
 
 ## Features
 
-- Shows the active input device name in the menu bar when a mic is capturing
-- Displays a quiet mic icon when no microphone is in use
+- Shows active input device names next to a blinking red status dot when a mic is capturing
+- Displays a standard mic icon in the system default menu bar color when no microphone is in use
 - Detects which apps are using the microphone (via system log attribution)
 - Input device switcher — change your default mic from the dropdown
 - Launch at Login support
@@ -46,7 +46,7 @@ MicBar uses three layers of detection to identify which apps are using your micr
 2. **CoreAudio private APIs** — attempts to find process ownership of audio taps on active devices
 3. **TCC heuristic** (fallback) — cross-references running apps with microphone permission grants
 
-For device detection, it scans all input devices via CoreAudio HAL for active input streams, not just the system default — so it correctly identifies non-default devices used directly by apps like Zoom or Meet.
+For device detection, it uses CoreAudio process objects to find active input streams across all devices, not just the system default — so it correctly identifies non-default devices used directly by apps like Zoom or Meet. Device state remains as a fallback when process objects are unavailable.
 
 ## License
 
